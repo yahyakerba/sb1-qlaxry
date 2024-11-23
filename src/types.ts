@@ -17,3 +17,9 @@ export interface RoomStats {
   totalWaiting: number;
   estimatedWaitTime: number;
 }
+
+export interface QueueUpdate {
+  roomId: string;
+  queue: QueueItem[];
+  currentlyServing: QueueItem | null;
+}

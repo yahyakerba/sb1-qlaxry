@@ -3,13 +3,16 @@ import type { Room, QueueItem } from '../types';
 
 interface QueueStore {
   rooms: Room[];
+  isLoading: boolean;
+  error: Error | null;
   addRoom: (room: Omit<Room, 'id' | 'queue' | 'currentlyServing'>) => void;
   updateRoom: (roomId: string, updates: Partial<Room>) => void;
   deleteRoom: (roomId: string) => void;
-  addToQueue: (roomId: string, name: string) => void;
+  addToQueue: (roomId: string, name: string) => Promise<void>;
   removeFromQueue: (roomId: string, queueItemId: string) => void;
   serveNext: (roomId: string) => void;
   completeService: (roomId: string) => void;
+  subscribeToUpdates: (callback: (rooms: Room[]) => void) => () => void;
 }
 
 const initialRooms: Room[] = [
@@ -36,81 +39,141 @@ const initialRooms: Room[] = [
   },
 ];
 
-export const useQueueStore = create<QueueStore>((set) => ({
+export const useQueueStore = create<QueueStore>((set, get) => ({
   rooms: initialRooms,
+  isLoading: false,
+  error: null,
   
-  addRoom: (room) => set((state) => ({
-    rooms: [...state.rooms, {
-      ...room,
-      id: Math.random().toString(36).substr(2, 9),
-      queue: [],
-      currentlyServing: null,
-    }],
-  })),
+  addRoom: (room) => {
+    set((state) => ({
+      rooms: [...state.rooms, {
+        ...room,
+        id: Math.random().toString(36).substr(2, 9),
+        queue: [],
+        currentlyServing: null,
+      }],
+      error: null,
+    }));
+  },
 
-  updateRoom: (roomId, updates) => set((state) => ({
-    rooms: state.rooms.map((room) =>
-      room.id === roomId ? { ...room, ...updates } : room
-    ),
-  })),
+  updateRoom: (roomId, updates) => {
+    set((state) => ({
+      rooms: state.rooms.map((room) =>
+        room.id === roomId ? { ...room, ...updates } : room
+      ),
+      error: null,
+    }));
+  },
 
-  deleteRoom: (roomId) => set((state) => ({
-    rooms: state.rooms.filter((room) => room.id !== roomId),
-  })),
+  deleteRoom: (roomId) => {
+    set((state) => ({
+      rooms: state.rooms.filter((room) => room.id !== roomId),
+      error: null,
+    }));
+  },
 
-  addToQueue: (roomId, name) => set((state) => ({
-    rooms: state.rooms.map((room) => {
-      if (room.id !== roomId) return room;
-
+  addToQueue: async (roomId, name) => {
+    set({ isLoading: true, error: null });
+    
+    try {
       const newQueueItem: QueueItem = {
         id: Math.random().toString(36).substr(2, 9),
         name,
         joinedAt: new Date(),
-        estimatedWaitTime: (room.queue.length + 1) * room.averageServiceTime,
+        estimatedWaitTime: 0,
       };
 
-      const updatedQueue = [...room.queue, newQueueItem];
-      
-      return {
-        ...room,
-        queue: updatedQueue,
-        currentlyServing: room.currentlyServing || updatedQueue[0] || null,
-      };
-    }),
-  })),
+      set((state) => ({
+        rooms: state.rooms.map((room) => {
+          if (room.id !== roomId) return room;
 
-  removeFromQueue: (roomId, queueItemId) => set((state) => ({
-    rooms: state.rooms.map((room) => {
-      if (room.id !== roomId) return room;
-      return {
-        ...room,
-        queue: room.queue.filter((item) => item.id !== queueItemId),
-      };
-    }),
-  })),
+          const updatedQueue = [...room.queue, newQueueItem];
+          const estimatedWaitTime = (updatedQueue.length) * room.averageServiceTime;
+          
+          // Update wait times for all items in queue
+          const queueWithUpdatedTimes = updatedQueue.map((item, index) => ({
+            ...item,
+            estimatedWaitTime: (index + 1) * room.averageServiceTime,
+          }));
 
-  serveNext: (roomId) => set((state) => ({
-    rooms: state.rooms.map((room) => {
-      if (room.id !== roomId) return room;
-      
-      const updatedQueue = [...room.queue];
-      const nextPerson = updatedQueue.shift();
+          return {
+            ...room,
+            queue: queueWithUpdatedTimes,
+            currentlyServing: room.currentlyServing || queueWithUpdatedTimes[0] || null,
+          };
+        }),
+        isLoading: false,
+      }));
+    } catch (error) {
+      set({ error: error as Error, isLoading: false });
+      throw error;
+    }
+  },
 
-      return {
-        ...room,
-        queue: updatedQueue,
-        currentlyServing: nextPerson || null,
-      };
-    }),
-  })),
+  removeFromQueue: (roomId, queueItemId) => {
+    set((state) => ({
+      rooms: state.rooms.map((room) => {
+        if (room.id !== roomId) return room;
+        
+        const updatedQueue = room.queue.filter((item) => item.id !== queueItemId);
+        
+        // Update wait times for remaining items
+        const queueWithUpdatedTimes = updatedQueue.map((item, index) => ({
+          ...item,
+          estimatedWaitTime: (index + 1) * room.averageServiceTime,
+        }));
 
-  completeService: (roomId) => set((state) => ({
-    rooms: state.rooms.map((room) => {
-      if (room.id !== roomId) return room;
-      return {
-        ...room,
-        currentlyServing: null,
-      };
-    }),
-  })),
+        return {
+          ...room,
+          queue: queueWithUpdatedTimes,
+        };
+      }),
+      error: null,
+    }));
+  },
+
+  serveNext: (roomId) => {
+    set((state) => ({
+      rooms: state.rooms.map((room) => {
+        if (room.id !== roomId) return room;
+        
+        const updatedQueue = [...room.queue];
+        const nextPerson = updatedQueue.shift();
+
+        // Update wait times for remaining items
+        const queueWithUpdatedTimes = updatedQueue.map((item, index) => ({
+          ...item,
+          estimatedWaitTime: (index + 1) * room.averageServiceTime,
+        }));
+
+        return {
+          ...room,
+          queue: queueWithUpdatedTimes,
+          currentlyServing: nextPerson || null,
+        };
+      }),
+      error: null,
+    }));
+  },
+
+  completeService: (roomId) => {
+    set((state) => ({
+      rooms: state.rooms.map((room) => {
+        if (room.id !== roomId) return room;
+        return {
+          ...room,
+          currentlyServing: null,
+        };
+      }),
+      error: null,
+    }));
+  },
+
+  subscribeToUpdates: (callback) => {
+    // Set up subscription
+    const unsubscribe = () => {
+      // Cleanup subscription
+    };
+    return unsubscribe;
+  },
 }));
